@@ -1,12 +1,20 @@
 import streamlit as st
 import sys
+import os
 import io
 from datetime import datetime
+
+# --- NEW IMPORTS for Email Automation ---
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+from email.utils import COMMASPACE 
+# ----------------------------------------
 
 # --- ReportLab Imports for advanced styling ---
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
-from reportlab.lib.units import cm
 from reportlab.lib.colors import HexColor
 from reportlab.platypus import Paragraph
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -23,20 +31,115 @@ if sys.version_info < (3, 9):
         return original_md5(*args, **kwargs)
     hashlib.md5 = patched_md5
 
+# --- EMAIL CONFIGURATION (MUST BE UPDATED) ---
+# ⚠️ Replace with your sending email details
+SENDER_EMAIL = os.getenv("SENDER_EMAIL")
+SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")      # Use an App Password for Gmail!
+INTERNAL_RECEIVER_EMAIL = os.getenv("INTERNAL_RECEIVER_EMAIL") # Internal recipient for the copy
+# --- NEW CC LIST ---
+INTERNAL_CC_EMAILS = ["kiran.alfaleus@gmail.com", "sandal@alfaleus.com"]
+# -------------------
+SMTP_SERVER = "smtp.gmail.com"  # Use "smtp.office365.com" for Outlook
+SMTP_PORT = 587
+# ---------------------------------------------
+
+# --- NEW GENERATOR CONFIGURATION ---
+GENERATOR_DETAILS = {
+    "Kiran Shukla": "Head of Sales",
+    "Abdul Baquee": "Sales Coordinator",
+    "Pius Varghese": "Operations Manager",
+    "Sandal Kotawala": "CEO"
+}
+# -----------------------------------
+
 st.title("🏥 Alfaleus Doctor Quotation Generator")
 
 # Define PDF page dimensions and margins
 WIDTH, HEIGHT = A4
 BORDER_MARGIN = 20
 
-# --- Form Inputs ---
-customer_name = st.text_input("Customer Name (e.g., Kauvery Eye Hospital)")
+# --- MODIFIED Function to send the quotation PDF via email (No change needed here) ---
+def send_quotation_email(quote_no, recipient_email, customer_name, pdf_buffer, is_customer_send=False):
+    """Sends the PDF quotation as an attachment to the specified email."""
+    
+    msg = MIMEMultipart()
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = recipient_email
+    
+    # Define recipients list for sendmail
+    recipients = [recipient_email]
 
-# Change 7: Customer Address now uses a text area and will be rendered correctly with line breaks.
+    if is_customer_send:
+        # Email content for the customer
+        msg['Subject'] = f"Sales Quotation {quote_no} from Alfaleus Tech Pvt Ltd"
+        
+        # --- ADD CC for Customer Send ---
+        msg['Cc'] = COMMASPACE.join(INTERNAL_CC_EMAILS)
+        recipients.extend(INTERNAL_CC_EMAILS) # Add CC recipients to the actual send list
+        # --------------------------------
+        
+        body = (
+            f"Dear {customer_name},\n\n"
+            f"Please find attached the Sales Quotation (No. {quote_no}) for the Intelligent Vision Analyser Plus (iVA+).\n\n"
+            f"Feel free to reach out if you have any questions.\n\n"
+            f"Best regards,\n"
+            f"Kiran Shukla\n"
+            f"Head of Sales, Alfaleus Technology Private Limited"
+        )
+        success_msg = f"📧 Quotation successfully sent to **{recipient_email}** (Customer) and CC'd to internal team."
+        error_prefix = "❌ Failed to send email to customer"
+    else:
+        # Email content for the internal copy (sent to sandal@alfaleus.com)
+        msg['Subject'] = f"INTERNAL COPY: New Quotation Generated: {quote_no} for {customer_name}"
+        body = f"A new Sales Quotation (No. {quote_no}) has been generated for {customer_name}. The PDF copy is attached."
+        success_msg = f"📧 Copy of quotation successfully sent to **{recipient_email}** (Internal)."
+        error_prefix = "❌ Failed to send internal copy"
+
+    msg.attach(MIMEText(body, 'plain'))
+
+    # Attach the PDF
+    pdf_attachment = MIMEApplication(pdf_buffer.getvalue(), _subtype="pdf")
+    pdf_attachment.add_header('Content-Disposition', 'attachment', filename=f"{quote_no}_{customer_name.replace(' ', '_')}.pdf")
+    msg.attach(pdf_attachment)
+
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()  # Secure the connection
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        
+        # Use the combined list of recipients for sendmail
+        server.sendmail(SENDER_EMAIL, recipients, msg.as_string())
+        server.quit()
+        
+        st.success(success_msg)
+        return True
+    except smtplib.SMTPAuthenticationError:
+        st.error(f"{error_prefix}: Email authentication failed. Check your SENDER_EMAIL/PASSWORD (or App Password for Gmail).")
+        return False
+    except Exception as e:
+        st.error(f"{error_prefix}: {e}")
+        return False
+
+# --- Form Inputs ---
+generator_name = st.selectbox(
+    "Quotation Generated By:",
+    options=list(GENERATOR_DETAILS.keys()),
+    index=0 # Default to Kiran Shukla
+)
+# Fetch the selected generator's title
+generator_title = GENERATOR_DETAILS[generator_name]
+
+st.subheader("Customer Details")
+customer_name = st.text_input("Customer Name (e.g., Kauvery Eye Hospital)")
+customer_email = st.text_input("Customer Email (e.g., info@kauveryhospital.com)")
 address = st.text_area("Customer Address")
 gstin = st.text_input("Customer GSTIN (or 'Nil')")
 
-# Change 4: Default text for Product Description
+st.subheader("Product Details & Pricing")
+# --- QUANTITY INPUT ---
+quantity = st.number_input("Quantity", min_value=1, step=1, value=1)
+# --------------------------
+
 default_description = (
     "Intelligent Vision Analyser Plus (iVA+)\n"
     "4th Generation - VR based visual field testing device - complete kit "
@@ -48,49 +151,83 @@ product_description = st.text_area(
     height=150
 )
 
-unit = st.text_input("Unit (e.g., 1 Nos)", value="1 Nos")
+# --- DERIVED UNIT TEXT ---
+unit_text = f"{quantity} Nos"
+# -------------------------
 
-# Change 6: Added a dynamic payment terms field
 default_payment_terms = "Rs. 11,000 booking amount and balance payment upon installation."
 payment_terms = st.text_area("Payment Terms", value=default_payment_terms)
 
 
-# Change 5: Rate is now inclusive of GST. Label and variable names updated.
-# Change 8: Currency symbol updated from ₹ to Rs.
-RATE_MIN = 300000.00
-RATE_MAX = 480000.00
+# --- RATE INPUT PER UNIT ---
+RATE_PER_UNIT_MIN = 300000.00
+RATE_PER_UNIT_MAX = 480000.00
+
+# Calculate the value constraint based on quantity
+TOTAL_MIN = RATE_PER_UNIT_MIN * quantity
+TOTAL_MAX = RATE_PER_UNIT_MAX * quantity
+
 total_inclusive_gst = st.number_input(
-    "Total Amount (Inclusive of GST) (Rs.) - Must be between 3,00,000 and 4,80,000",
-    min_value=RATE_MIN,
-    max_value=RATE_MAX,
+    f"Total Amount (Inclusive of GST) (Rs.) for **{quantity} Units** - Must be between {TOTAL_MIN:,.2f} and {TOTAL_MAX:,.2f}",
+    min_value=TOTAL_MIN,
+    max_value=TOTAL_MAX,
     step=1000.00,
-    value=RATE_MIN,
+    value=TOTAL_MIN,
     format="%.2f"
 )
+# ----------------------------------------------------
 
 gst_percent = st.number_input("GST (%)", min_value=0.0, step=0.01, value=5.0)
 
+st.divider() # Visual separation for email options
 
-if st.button("Generate Alfaleus Quotation PDF"):
+# --- CHECKBOX LINE: value=False makes it unchecked by default ---
+send_to_customer = st.checkbox(" Send a copy directly to the Customer Email", value=False) 
+# -------------------------------------------------------------------------
+
+st.caption(f"An internal copy will always be sent to **{INTERNAL_RECEIVER_EMAIL}**.")
+st.caption(f"If sending to the customer, **{COMMASPACE.join(INTERNAL_CC_EMAILS)}** will be CC'd.")
+
+if st.button("Generate Alfaleus Quotation PDF and Send Emails"):
     # Input validation
-    if not (RATE_MIN <= total_inclusive_gst <= RATE_MAX):
-        st.error(f"The entered rate must be between Rs.{RATE_MIN:,.2f} and Rs.{RATE_MAX:,.2f}.")
+    if not customer_name:
+        st.error("Please enter the **Customer Name**.")
+        st.stop()
+    if send_to_customer and not customer_email:
+        st.error("Please enter the **Customer Email** to send the quotation.")
         st.stop()
         
-    # ---- Calculations (based on inclusive GST) ----
-    # Change 5: Logic reversed to calculate base rate from the total.
-    rate_exclusive_gst = total_inclusive_gst / (1 + gst_percent / 100)
-    gst_amount = total_inclusive_gst - rate_exclusive_gst
+    # Validation for calculated rate per unit
+    rate_per_unit_inclusive = total_inclusive_gst / quantity
+    if not (RATE_PER_UNIT_MIN <= rate_per_unit_inclusive <= RATE_PER_UNIT_MAX):
+        st.error(
+            f"The **Rate Per Unit (Inclusive of GST)** is Rs. {rate_per_unit_inclusive:,.2f}, "
+            f"which must be between Rs.{RATE_PER_UNIT_MIN:,.2f} and Rs.{RATE_PER_UNIT_MAX:,.2f}."
+        )
+        st.stop()
+        
+    # ---- Calculations ----
+    rate_per_unit_inclusive = total_inclusive_gst / quantity
+    rate_per_unit_exclusive = rate_per_unit_inclusive / (1 + gst_percent / 100)
     
-    quote_no = f"ALF/{datetime.now().year % 100}-{(datetime.now().year + 1) % 100}/{int(datetime.now().timestamp()) % 1000:03d}"
-    date_str = datetime.now().strftime("%d/%m/%Y")
+    total_exclusive_gst = rate_per_unit_exclusive * quantity
+    gst_amount = total_inclusive_gst - total_exclusive_gst
+    # -------------------------------
+    
+    now = datetime.now()
+    year_short = now.year % 100
+    next_year_short = (now.year + 1) % 100
+    month_int = now.month
+    micro_suffix = int(now.timestamp() * 1000) % 10000 
+    
+    quote_no = f"ALF/{year_short:02d}-{next_year_short:02d}/{month_int:02d}/{micro_suffix:04d}"
+    date_str = now.strftime("%d/%m/%Y")
 
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     
-    # --- Helper for drawing wrapped text (Paragraphs) ---
+    # --- PDF Generation Logic ---
     styles = getSampleStyleSheet()
-    # Style for address and description
     para_style = ParagraphStyle(
         'Normal_Left',
         parent=styles['Normal'],
@@ -100,30 +237,25 @@ if st.button("Generate Alfaleus Quotation PDF"):
         alignment=TA_LEFT
     )
 
-    # 1 - include a border for overall generated quotation
     c.rect(BORDER_MARGIN, BORDER_MARGIN, WIDTH - 2 * BORDER_MARGIN, HEIGHT - 2 * BORDER_MARGIN)
 
-    # ---- Header ----
-    # Change 1: Header color set to #255290
+    # Header
     c.setFillColor(HexColor('#255290'))
     c.setFont("Helvetica-Bold", 12)
     c.drawCentredString(WIDTH / 2, HEIGHT - 40, "ALFALEUS TECHNOLOGY PRIVATE LIMITED")
-    c.setFillColorRGB(0, 0, 0) # Reset color to black
-
+    c.setFillColorRGB(0, 0, 0)
     c.setFont("Helvetica", 9)
     c.drawCentredString(WIDTH / 2, HEIGHT - 55,
         "Registered Office : II Floor, 654, Vivek Vihar, New Sanganare Road, Jaipur, Rajasthan - 302019")
     c.drawCentredString(WIDTH / 2, HEIGHT - 68,
         "CIN : U74999RJ2018PTC060255 | Mail : info@alfaleus.com | Contact : +91 96550 42547")
 
-    # ---- Quotation Title ----
+    # Quotation Title
     c.setFont("Helvetica-Bold", 14)
     c.drawCentredString(WIDTH / 2, HEIGHT - 100, "Sales Quotation")
 
-    # ---- Supplier Info ----
+    # Supplier Info
     y = HEIGHT - 130
-    
-    # Change 1: "Name of Supplier:" is bold, value is normal, no extra space
     bold_text = "Name of Supplier: "
     normal_text = "Alfaleus Technology Private Limited"
     c.setFont("Helvetica-Bold", 10)
@@ -131,9 +263,7 @@ if st.button("Generate Alfaleus Quotation PDF"):
     text_width = c.stringWidth(bold_text, "Helvetica-Bold", 10)
     c.setFont("Helvetica", 10)
     c.drawString(50 + text_width, y, normal_text)
-
     y -= 15
-    # MODIFICATION 1: Make "Quotation No" bold
     bold_quote = "Quotation No: "
     normal_quote_no = quote_no
     c.setFont("Helvetica-Bold", 10)
@@ -141,13 +271,8 @@ if st.button("Generate Alfaleus Quotation PDF"):
     quote_width = c.stringWidth(bold_quote, "Helvetica-Bold", 10)
     c.setFont("Helvetica", 10)
     c.drawString(50 + quote_width, y, normal_quote_no)
-    
-    # Change 2: Date is right-aligned
     c.drawRightString(WIDTH - 50, y, f"Date: {date_str}")
-    
-    # Change 3: Added one line space after date/quote line
     y -= 30 
-    
     c.drawString(50, y, "Head Office: E1, Technology Research Park, IIT Hyderabad, Kandi - 502285")
     y -= 15
     c.drawString(50, y, "GSTIN : 36AAQCA5270P1ZY")
@@ -156,25 +281,34 @@ if st.button("Generate Alfaleus Quotation PDF"):
     y -= 15
     c.drawString(50, y, "Phone: +91 96550 42547")
 
-    # ---- Customer Details ----
+    # Customer Details - MODIFIED TO HIGHLIGHT NAME
     y -= 30
     c.setFont("Helvetica-Bold", 11)
     c.drawString(50, y, "Customer Details")
     y -= 15
-    c.setFont("Helvetica", 10)
-    c.drawString(50, y, f"Name : {customer_name}")
-    y -= 15
     
-    # Change 7: Draw address using Paragraph to handle multiple lines
+    # ------------------- HIGHLIGHTING IMPLEMENTATION -------------------
+    c.setFont("Helvetica-Bold", 10) 
+    bold_label = "Name : "
+    c.drawString(50, y, bold_label)
+    label_width = c.stringWidth(bold_label, "Helvetica-Bold", 10)
+
+    c.setFont("Helvetica-Bold", 10) 
+    c.drawString(50 + label_width, y, customer_name)
+    c.setFont("Helvetica", 10) # Revert to normal for subsequent lines
+    # -------------------------------------------------------------------
+
+    y -= 15
+    c.drawString(50, y, f"Email : {customer_email}")
+    y -= 15
     address_text = address.replace('\n', '<br/>')
     address_para = Paragraph(f"Address : {address_text}", para_style)
-    w_addr, h_addr = address_para.wrapOn(c, WIDTH - 100, HEIGHT) # Get required height
+    w_addr, h_addr = address_para.wrapOn(c, WIDTH - 100, HEIGHT) 
     address_para.drawOn(c, 50, y - h_addr)
-    y -= (h_addr + 15) # Move y-cursor down by the height of the address block
-    
+    y -= (h_addr + 15) 
     c.drawString(50, y, f"GSTIN : {gstin}")
 
-    # ---- Product Details Table ----
+    # Product Details Table
     y -= 30
     c.setFont("Helvetica-Bold", 11)
     c.drawString(50, y, "Product Details")
@@ -183,56 +317,40 @@ if st.button("Generate Alfaleus Quotation PDF"):
     c.drawString(50, y, "S No.")
     c.drawString(90, y, "Product Description")
     c.drawString(350, y, "Unit")
-    c.drawString(420, y, "Amount (Rs.)") # Change 8
-    c.drawString(510, y, "Total (Rs.)")  # Change 8
+    c.drawString(420, y, "Rate/Unit (Rs.)") 
+    c.drawString(510, y, "Total (Rs.)") 
     y -= 10
     c.line(50, y, 550, y)
     y -= 15
-
     c.setFont("Helvetica", 10)
     c.drawString(55, y, "1")
-    
-    # Change 4: Draw product description using Paragraph to handle wrapping and newlines
     desc_text = product_description.replace('\n', '<br/>')
     desc_para = Paragraph(desc_text, para_style)
-    w_desc, h_desc = desc_para.wrapOn(c, 250, HEIGHT) # Wrap in a 250-point width column
-    
-    # y-position for drawing the paragraph needs to be adjusted since drawOn uses bottom-left corner
+    w_desc, h_desc = desc_para.wrapOn(c, 250, HEIGHT) 
     y_start_desc = y - (h_desc - 10) 
     desc_para.drawOn(c, 90, y_start_desc)
-    
-    # Align other cells with the top of the description
-    c.drawString(350, y, unit)
-
-    # Use the calculated pre-GST rate here
-    c.drawRightString(480, y, f"{rate_exclusive_gst:,.2f}") 
-    c.drawRightString(550, y, f"{rate_exclusive_gst:,.2f}")
-
-    # Set y to below the tallest element in the row (the description)
+    c.drawString(350, y, unit_text) 
+    c.drawRightString(480, y, f"{rate_per_unit_exclusive:,.2f}") 
+    c.drawRightString(550, y, f"{total_exclusive_gst:,.2f}") 
     y = y_start_desc - 15
 
-    # ---- Total Calculations Section ----
+    # Total Calculations Section
     c.setFont("Helvetica", 10)
     c.drawString(300, y, "Sub Total:")
-    c.drawRightString(550, y, f"{rate_exclusive_gst:,.2f}")
-    
+    c.drawRightString(550, y, f"{total_exclusive_gst:,.2f}") 
     y -= 20
     c.drawString(300, y, f"Add GST ({gst_percent:.2f}%):")
     c.drawRightString(550, y, f"{gst_amount:,.2f}")
-
     y -= 10
     c.line(300, y, 550, y)
-
     y -= 20
     c.setFont("Helvetica-Bold", 12)
     c.drawString(300, y, "Grand Total:")
-    # Change 8
     c.drawRightString(550, y, f"Rs. {total_inclusive_gst:,.2f}")
     
-    # ---- Amount in Words ----
+    # Amount in Words
     y -= 30
     words = num2words(round(total_inclusive_gst), lang='en_IN').title()
-    # MODIFICATION 2: Make "Value in words" bold
     bold_value = "Value in words"
     normal_text_words = f": Rupees {words} Only."
     c.setFont("Helvetica-Bold", 10)
@@ -241,54 +359,65 @@ if st.button("Generate Alfaleus Quotation PDF"):
     c.setFont("Helvetica", 10)
     c.drawString(50 + words_width, y, normal_text_words)
 
-    # ---- Declaration ----
+    # Declaration - MODIFIED TO USE SELECTED NAME
     y -= 40
     c.setFont("Helvetica-Bold", 10)
     c.drawString(50, y, "Declaration:")
     y -= 15
     c.setFont("Helvetica", 10)
-    # MODIFICATION 3: Change Declaration text
-    c.drawString(50, y, "On behalf of M/s Alfaleus Technology Private Limited generated by Mr. Kiran Shukla")
+    # Use the selected generator_name
+    c.drawString(50, y, f"On behalf of M/s Alfaleus Technology Private Limited generated by Mr. {generator_name}")
     y -= 15
     c.drawString(50, y, "- The particulars given above are true and correct.")
 
-    # ---- Terms & Conditions ----
+    # Terms & Conditions
     y -= 30
     c.setFont("Helvetica-Bold", 10)
     c.drawString(50, y, "Terms & Conditions -")
     y -= 15
     c.setFont("Helvetica", 10)
-    
-    # Change 6: Use dynamic payment terms
     terms = [
         f"1 - Payment terms: {payment_terms}",
         "2 - Delivery terms: Dispatch within 30 working days from order placement."
     ]
     for t in terms:
-        # Using a Paragraph for terms as well to handle potential wrapping
         term_para = Paragraph(t, para_style)
         w_term, h_term = term_para.wrapOn(c, WIDTH - 100, HEIGHT)
         term_para.drawOn(c, 50, y - h_term)
         y -= (h_term + 5)
 
 
-    # ---- Signature ----
-    y = BORDER_MARGIN + 80 # Position signature from the bottom for consistency
-    c.drawString(50, y, "Kiran Shukla")
-    c.drawString(50, y - 12, "Head of Sales")
-    c.drawString(50, y - 24, "Alfaleus Technology Pvt. Ltd, TRP, IIT Hyderabad, Kandi - 502285")
+    # Signature (Right-Aligned) - MODIFIED TO USE SELECTED NAME AND TITLE
+    y = BORDER_MARGIN + 80 
+    RIGHT_POS = WIDTH - 50 
+    c.drawRightString(RIGHT_POS, y, generator_name) # Signature Name
+    c.drawRightString(RIGHT_POS, y - 12, generator_title) # Signature Title
+    c.drawRightString(RIGHT_POS, y - 24, "Alfaleus Technology Pvt. Ltd, TRP, IIT Hyderabad, Kandi - 502285")
 
-    # ---- Footer ----
+    # Footer
     c.setFont("Helvetica-Oblique", 9)
     c.drawString(50, BORDER_MARGIN + 15,
         "This is a computer generated quotation and does not require physical signature. "
         "For any queries, contact info@alfaleus.com")
 
-    # ---- Save and Download ----
+    # ---- Save PDF to buffer ----
     c.showPage()
     c.save()
     buffer.seek(0)
 
+    # --- EMAIL THE PDF COPY ---
+    # 1. Send internal copy (always)
+    send_quotation_email(quote_no, INTERNAL_RECEIVER_EMAIL, customer_name, buffer, is_customer_send=False)
+    
+    # Reset buffer for the second email
+    buffer.seek(0) 
+
+    # 2. Send to customer (if checked and email provided)
+    if send_to_customer and customer_email:
+        send_quotation_email(quote_no, customer_email, customer_name, buffer, is_customer_send=True)
+    # --------------------------
+
+    # ---- Download Button ----
     st.download_button(
         label="📄 Download Quotation PDF",
         data=buffer,
